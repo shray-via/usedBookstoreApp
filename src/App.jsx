@@ -18,6 +18,7 @@ const initialForm = {
 };
 
 const supportsBarcodeDetector = typeof window !== "undefined" && "BarcodeDetector" in window;
+const supportsGetUserMedia = typeof navigator !== "undefined" && Boolean(navigator.mediaDevices?.getUserMedia);
 
 function App() {
   const [books, setBooks] = useState([]);
@@ -34,6 +35,7 @@ function App() {
 
   const videoRef = useRef(null);
   const fileInputRef = useRef(null);
+  const qrCaptureInputRef = useRef(null);
   const streamRef = useRef(null);
   const scanTimerRef = useRef(null);
 
@@ -114,6 +116,51 @@ function App() {
     lookupByIsbn(isbn);
   };
 
+  const getCameraErrorMessage = (error) => {
+    if (!error) return "Camera access failed. Use photo capture fallback below.";
+    if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
+      return "Camera permission is blocked. Allow camera access in browser settings, then retry.";
+    }
+    if (error.name === "NotFoundError") {
+      return "No camera found on this device. Use the photo upload method.";
+    }
+    if (error.name === "NotReadableError") {
+      return "Camera is being used by another app. Close other camera apps and retry.";
+    }
+    if (error.name === "SecurityError") {
+      return "Camera requires a secure context (HTTPS). Use photo upload or ISBN input.";
+    }
+    return error.message || "Camera access failed. Use photo capture fallback below.";
+  };
+
+  const detectBarcodeFromFile = async (file) => {
+    if (!detector) {
+      throw new Error("Barcode detection is not supported in this browser. Enter ISBN manually.");
+    }
+
+    if (typeof createImageBitmap === "function") {
+      const bitmap = await createImageBitmap(file);
+      try {
+        return await detector.detect(bitmap);
+      } finally {
+        bitmap.close?.();
+      }
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const image = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error("Failed to read this image."));
+        img.src = objectUrl;
+      });
+      return await detector.detect(image);
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  };
+
   const scanFromVideo = async () => {
     if (!detector || !videoRef.current) return;
     try {
@@ -130,7 +177,15 @@ function App() {
 
   const startScanning = async () => {
     if (!detector) {
-      setSaveError("Barcode scanning is not supported in this browser.");
+      setSaveError("Live scanner is not supported in this browser. Use photo capture or ISBN input.");
+      return;
+    }
+    if (!supportsGetUserMedia) {
+      setSaveError("Camera API unavailable. Use photo capture fallback below.");
+      return;
+    }
+    if (!window.isSecureContext) {
+      setSaveError("Live camera requires HTTPS. Use photo capture fallback below.");
       return;
     }
     setSaveError("");
@@ -147,8 +202,8 @@ function App() {
       }
       setIsScanning(true);
       scanTimerRef.current = window.setInterval(scanFromVideo, 800);
-    } catch {
-      setSaveError("Camera permission is required for QR/ISBN scanning.");
+    } catch (error) {
+      setSaveError(getCameraErrorMessage(error));
     }
   };
 
@@ -170,24 +225,39 @@ function App() {
   const onPhotoSelected = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!detector) {
-      setSaveError("Photo barcode detection is not supported in this browser.");
-      return;
-    }
 
     setSaveError("");
     setSaveSuccess("");
 
     try {
-      const bitmap = await createImageBitmap(file);
-      const barcodes = await detector.detect(bitmap);
-      bitmap.close();
+      const barcodes = await detectBarcodeFromFile(file);
       if (barcodes.length === 0 || !barcodes[0].rawValue) {
         throw new Error("No QR/ISBN barcode found in this photo.");
       }
       parseDetectedCode(barcodes[0].rawValue);
     } catch (error) {
       setSaveError(error.message || "Photo scan failed.");
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  const onQrCaptureSelected = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setSaveError("");
+    setSaveSuccess("");
+
+    try {
+      const barcodes = await detectBarcodeFromFile(file);
+      if (barcodes.length === 0 || !barcodes[0].rawValue) {
+        throw new Error("No QR/ISBN barcode found in this image.");
+      }
+      parseDetectedCode(barcodes[0].rawValue);
+    } catch (error) {
+      setSaveError(error.message || "QR image scan failed.");
+    } finally {
+      event.target.value = "";
     }
   };
 
@@ -221,6 +291,12 @@ function App() {
       setIsSaving(false);
     }
   };
+
+  useEffect(() => {
+    if (activeMethod !== "qr") {
+      stopScanning();
+    }
+  }, [activeMethod]);
 
   return (
     <main className="min-h-screen bg-page-100 font-sans text-base text-ink-700">
@@ -285,12 +361,27 @@ function App() {
                 <div className="overflow-hidden rounded-xl bg-page-200">
                   <video ref={videoRef} muted playsInline className="h-56 w-full object-cover md:h-64" />
                 </div>
+                <input
+                  ref={qrCaptureInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={onQrCaptureSelected}
+                  className="hidden"
+                />
                 <button
                   type="button"
                   onClick={isScanning ? stopScanning : startScanning}
                   className="min-h-[44px] w-full rounded-xl bg-ink-600 px-6 py-3 text-base font-semibold text-white transition-all hover:brightness-110"
                 >
                   {isScanning ? "Stop Scanner" : "Start QR / ISBN Scanner"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => qrCaptureInputRef.current?.click()}
+                  className="min-h-[44px] w-full rounded-xl bg-brand-600 px-6 py-3 text-base font-semibold text-white transition-all hover:brightness-110"
+                >
+                  Take QR Photo Instead
                 </button>
               </div>
             ) : null}
@@ -304,6 +395,7 @@ function App() {
                   ref={fileInputRef}
                   type="file"
                   accept="image/*"
+                  capture="environment"
                   onChange={onPhotoSelected}
                   className="hidden"
                 />

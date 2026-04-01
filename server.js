@@ -78,6 +78,11 @@ app.get("/api/books", async (req, res) => {
     });
     res.json(books);
   } catch (error) {
+    if (error?.code === "P2021") {
+      res.json([]);
+      return;
+    }
+    console.error("Failed to load books:", error);
     res.status(500).json({ error: "Failed to load books." });
   }
 });
@@ -98,6 +103,7 @@ app.get("/api/books/lookup", async (req, res) => {
 
     res.json(book);
   } catch (error) {
+    console.error("ISBN lookup failed:", error);
     res.status(500).json({ error: "Lookup failed. Try again." });
   }
 });
@@ -139,6 +145,11 @@ app.post("/api/books", async (req, res) => {
       res.status(409).json({ error: "This ISBN already exists in your inventory." });
       return;
     }
+    if (error?.code === "P2021") {
+      res.status(500).json({ error: "Book table not ready. Run prisma db push and retry." });
+      return;
+    }
+    console.error("Failed to create book:", error);
     res.status(500).json({ error: "Failed to add book." });
   }
 });
